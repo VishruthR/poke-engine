@@ -159,6 +159,168 @@ def monte_carlo_tree_search(state: State, duration_ms: int = 1000) -> MctsResult
     return MctsResult._from_rust(mcts(state, duration_ms))
 
 
+@dataclass
+class MctsRegretMatchingSideResult:
+    """
+    Result of a regret-matching MCTS search for a single side
+
+    :param move_choice: The move
+    :type move_choice: str
+    :param total_score: Total score accumulated for the move
+    :type total_score: float
+    :param visits: Number of times the move was sampled
+    :type visits: int
+    :param avg_strat: Average strategy weight in [0, 1] — converges to Nash
+    :type avg_strat: float
+    """
+
+    move_choice: str
+    total_score: float
+    visits: int
+    avg_strat: float
+
+
+@dataclass
+class MctsRegretMatchingResult:
+    """
+    Result of a regret-matching MCTS (external-sampling MCCFR-style) search
+
+    :param side_one: Result for side one
+    :type side_one: list[MctsRegretMatchingSideResult]
+    :param side_two: Result for side two
+    :type side_two: list[MctsRegretMatchingSideResult]
+    :param total_visits: Total number of search iterations
+    :type total_visits: int
+    """
+
+    side_one: list[MctsRegretMatchingSideResult]
+    side_two: list[MctsRegretMatchingSideResult]
+    total_visits: int
+
+    @classmethod
+    def _from_rust(cls, rust_result):
+        return cls(
+            side_one=[
+                MctsRegretMatchingSideResult(
+                    move_choice=i.move_choice,
+                    total_score=i.total_score,
+                    visits=i.visits,
+                    avg_strat=i.avg_strat,
+                )
+                for i in rust_result.s1
+            ],
+            side_two=[
+                MctsRegretMatchingSideResult(
+                    move_choice=i.move_choice,
+                    total_score=i.total_score,
+                    visits=i.visits,
+                    avg_strat=i.avg_strat,
+                )
+                for i in rust_result.s2
+            ],
+            total_visits=rust_result.iteration_count,
+        )
+
+
+def monte_carlo_tree_search_regret_matching(
+    state: State, duration_ms: int = 1000
+) -> MctsRegretMatchingResult:
+    """
+    Run regret-matching MCTS (external-sampling MCCFR variant) and return the
+    accumulated stats plus each side's average strategy.
+
+    :param state: the state to search through
+    :type state: State
+    :param duration_ms: time in milliseconds to run the search
+    :type duration_ms: int
+    :return: the result of the search, including ``avg_strat`` per move
+    :rtype: MctsRegretMatchingResult
+    """
+    return MctsRegretMatchingResult._from_rust(
+        mcts_regret_matching(state, duration_ms)
+    )
+
+
+@dataclass
+class MctsExp3SideResult:
+    """
+    Result of an EXP3 MCTS search for a single side
+
+    :param move_choice: The move
+    :type move_choice: str
+    :param total_score: Total score accumulated for the move
+    :type total_score: float
+    :param visits: Number of times the move was sampled
+    :type visits: int
+    :param avg_strat: Average strategy weight in [0, 1]
+    :type avg_strat: float
+    """
+
+    move_choice: str
+    total_score: float
+    visits: int
+    avg_strat: float
+
+
+@dataclass
+class MctsExp3Result:
+    """
+    Result of an EXP3 MCTS search
+
+    :param side_one: Result for side one
+    :type side_one: list[MctsExp3SideResult]
+    :param side_two: Result for side two
+    :type side_two: list[MctsExp3SideResult]
+    :param total_visits: Total number of search iterations
+    :type total_visits: int
+    """
+
+    side_one: list[MctsExp3SideResult]
+    side_two: list[MctsExp3SideResult]
+    total_visits: int
+
+    @classmethod
+    def _from_rust(cls, rust_result):
+        return cls(
+            side_one=[
+                MctsExp3SideResult(
+                    move_choice=i.move_choice,
+                    total_score=i.total_score,
+                    visits=i.visits,
+                    avg_strat=i.avg_strat,
+                )
+                for i in rust_result.s1
+            ],
+            side_two=[
+                MctsExp3SideResult(
+                    move_choice=i.move_choice,
+                    total_score=i.total_score,
+                    visits=i.visits,
+                    avg_strat=i.avg_strat,
+                )
+                for i in rust_result.s2
+            ],
+            total_visits=rust_result.iteration_count,
+        )
+
+
+def monte_carlo_tree_search_exp3(
+    state: State, duration_ms: int = 1000
+) -> MctsExp3Result:
+    """
+    Run EXP3-based MCTS and return the accumulated stats plus each side's
+    average strategy.
+
+    :param state: the state to search through
+    :type state: State
+    :param duration_ms: time in milliseconds to run the search
+    :type duration_ms: int
+    :return: the result of the search, including ``avg_strat`` per move
+    :rtype: MctsExp3Result
+    """
+    return MctsExp3Result._from_rust(mcts_exp3(state, duration_ms))
+
+
 def iterative_deepening_expectiminimax(
     state: State, duration_ms: int = 1000
 ) -> IterativeDeepeningResult:

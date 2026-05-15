@@ -12,6 +12,14 @@ use poke_engine::engine::items::Items;
 use poke_engine::engine::state::{MoveChoice, PokemonVolatileStatus, Terrain, Weather};
 use poke_engine::instruction::{Instruction, StateInstructions};
 use poke_engine::mcts::{perform_mcts, MctsResult, MctsSideResult};
+use poke_engine::mcts_regret_matching::{
+    perform_mcts_regret_matching, MctsResult as MctsResultRM,
+    MctsSideResult as MctsSideResultRM,
+};
+use poke_engine::mcts_exp3::{
+    perform_mcts_exp3, MctsResult as MctsResultExp3,
+    MctsSideResult as MctsSideResultExp3,
+};
 use poke_engine::pokemon::PokemonName;
 use poke_engine::search::iterative_deepen_expectiminimax;
 use poke_engine::state::{
@@ -915,6 +923,118 @@ fn mcts(py_state: PyState, duration_ms: u64) -> PyResult<PyMctsResult> {
     Ok(py_mcts_result)
 }
 
+#[derive(Clone)]
+#[pyclass(get_all)]
+struct PyMctsSideResultRM {
+    pub move_choice: String,
+    pub total_score: f32,
+    pub visits: u32,
+    pub avg_strat: f32,
+}
+
+impl PyMctsSideResultRM {
+    fn from_side_result(result: MctsSideResultRM, side: &Side) -> Self {
+        PyMctsSideResultRM {
+            move_choice: movechoice_to_string(side, &result.move_choice),
+            total_score: result.total_score,
+            visits: result.visits,
+            avg_strat: result.avg_strat,
+        }
+    }
+}
+
+#[derive(Clone)]
+#[pyclass(get_all)]
+struct PyMctsResultRM {
+    s1: Vec<PyMctsSideResultRM>,
+    s2: Vec<PyMctsSideResultRM>,
+    iteration_count: u32,
+}
+
+impl PyMctsResultRM {
+    fn from_result(result: MctsResultRM, state: &State) -> Self {
+        PyMctsResultRM {
+            s1: result
+                .s1
+                .iter()
+                .map(|r| PyMctsSideResultRM::from_side_result(r.clone(), &state.side_one))
+                .collect(),
+            s2: result
+                .s2
+                .iter()
+                .map(|r| PyMctsSideResultRM::from_side_result(r.clone(), &state.side_two))
+                .collect(),
+            iteration_count: result.iteration_count,
+        }
+    }
+}
+
+#[pyfunction]
+fn mcts_regret_matching(py_state: PyState, duration_ms: u64) -> PyResult<PyMctsResultRM> {
+    let mut state: State = py_state.into();
+    let duration = Duration::from_millis(duration_ms);
+    let (s1_options, s2_options) = state.root_get_all_options();
+    let mcts_result = perform_mcts_regret_matching(&mut state, s1_options, s2_options, duration);
+
+    Ok(PyMctsResultRM::from_result(mcts_result, &state))
+}
+
+#[derive(Clone)]
+#[pyclass(get_all)]
+struct PyMctsSideResultExp3 {
+    pub move_choice: String,
+    pub total_score: f32,
+    pub visits: u32,
+    pub avg_strat: f32,
+}
+
+impl PyMctsSideResultExp3 {
+    fn from_side_result(result: MctsSideResultExp3, side: &Side) -> Self {
+        PyMctsSideResultExp3 {
+            move_choice: movechoice_to_string(side, &result.move_choice),
+            total_score: result.total_score,
+            visits: result.visits,
+            avg_strat: result.avg_strat,
+        }
+    }
+}
+
+#[derive(Clone)]
+#[pyclass(get_all)]
+struct PyMctsResultExp3 {
+    s1: Vec<PyMctsSideResultExp3>,
+    s2: Vec<PyMctsSideResultExp3>,
+    iteration_count: u32,
+}
+
+impl PyMctsResultExp3 {
+    fn from_result(result: MctsResultExp3, state: &State) -> Self {
+        PyMctsResultExp3 {
+            s1: result
+                .s1
+                .iter()
+                .map(|r| PyMctsSideResultExp3::from_side_result(r.clone(), &state.side_one))
+                .collect(),
+            s2: result
+                .s2
+                .iter()
+                .map(|r| PyMctsSideResultExp3::from_side_result(r.clone(), &state.side_two))
+                .collect(),
+            iteration_count: result.iteration_count,
+        }
+    }
+}
+
+#[pyfunction]
+fn mcts_exp3(py_state: PyState, duration_ms: u64) -> PyResult<PyMctsResultExp3> {
+    let mut state: State = py_state.into();
+    let duration = Duration::from_millis(duration_ms);
+    let (s1_options, s2_options) = state.root_get_all_options();
+    let mcts_result = perform_mcts_exp3(&mut state, s1_options, s2_options, duration);
+
+    Ok(PyMctsResultExp3::from_result(mcts_result, &state))
+}
+
 #[pyfunction]
 fn id(py_state: PyState, duration_ms: u64) -> PyResult<PyIterativeDeepeningResult> {
     let mut state: State = py_state.into();
@@ -1089,6 +1209,12 @@ fn py_poke_engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(generate_instructions, m)?)?;
     m.add_function(wrap_pyfunction!(id, m)?)?;
     m.add_function(wrap_pyfunction!(mcts, m)?)?;
+    m.add_function(wrap_pyfunction!(mcts_regret_matching, m)?)?;
+    m.add_class::<PyMctsResultRM>()?;
+    m.add_class::<PyMctsSideResultRM>()?;
+    m.add_function(wrap_pyfunction!(mcts_exp3, m)?)?;
+    m.add_class::<PyMctsResultExp3>()?;
+    m.add_class::<PyMctsSideResultExp3>()?;
     m.add_class::<PyState>()?;
     m.add_class::<PySide>()?;
     m.add_class::<PySideConditions>()?;

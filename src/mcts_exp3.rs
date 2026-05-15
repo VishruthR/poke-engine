@@ -11,6 +11,9 @@ use std::fs::OpenOptions;
 use std::io::{BufWriter, Write};
 use std::time::Duration;
 
+const GAMMA: f64 = 0.1;
+const CURR_STRAT_FLOOR: f64 = 1e-6;
+
 fn sigmoid(x: f32) -> f32 {
     // Tuned so that ~200 points is very close to 1.0
     1.0 / (1.0 + (-0.0125 * x).exp())
@@ -22,6 +25,7 @@ pub struct Node {
     pub parent: *mut Node,
     pub children: HashMap<(usize, usize), Vec<Node>>,
     pub times_visited: u32,
+    pub total_score: f32,
     pub depth: u16,
 
     // represents the instructions & s1/s2 moves that led to this node from the parent
@@ -42,6 +46,7 @@ impl Node {
             parent: std::ptr::null_mut(),
             instructions: StateInstructions::default(),
             times_visited: 0,
+            total_score: 0.0,
             depth: 0,
             children: HashMap::new(),
             s1_choice: 0,
@@ -57,6 +62,9 @@ impl Node {
                 move_choice: x.clone(),
                 total_score: 0.0,
                 visits: 0,
+                cum_strat: 0.0,
+                curr_strat: 0.0,
+                est_score: 0.0,
             })
             .collect();
         let s2_options_vec: Vec<MoveNode> = s2_options
@@ -65,6 +73,9 @@ impl Node {
                 move_choice: x.clone(),
                 total_score: 0.0,
                 visits: 0,
+                cum_strat: 0.0,
+                curr_strat: 0.0,
+                est_score: 0.0,
             })
             .collect();
 
@@ -72,17 +83,36 @@ impl Node {
         self.s2_options = Some(s2_options_vec);
     }
 
-    pub fn maximize_ucb_for_side(&self, side_map: &[MoveNode]) -> usize {
-        let mut choice = 0;
-        let mut best_ucb1 = f32::MIN;
-        for (index, node) in side_map.iter().enumerate() {
-            let this_ucb1 = node.ucb1(self.times_visited);
-            if this_ucb1 > best_ucb1 {
-                best_ucb1 = this_ucb1;
-                choice = index;
-            }
+    pub fn exp3_strategy(side_map: &[MoveNode], gamma: f64) -> Vec<f64> {
+        let k = side_map.len() as f64;
+        let lr = gamma / k;
+        let exploration = gamma / k;
+        let max_score = side_map
+            .iter()
+            .map(|m| m.est_score)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let exp_weights: Vec<f64> = side_map
+            .iter()
+            .map(|m| (lr * (m.est_score - max_score)).exp())
+            .collect();
+        let denom: f64 = exp_weights.iter().sum();
+        exp_weights
+            .iter()
+            .map(|w| (1.0 - gamma) * (w / denom) + exploration)
+            .collect()
+    }
+
+    pub fn exp3_selection(side_map: &mut [MoveNode]) -> usize {
+        let strategy = Self::exp3_strategy(side_map, GAMMA);
+
+        // Update cumulative strategies
+        for (idx, move_strat) in strategy.iter().enumerate() {
+            side_map[idx].curr_strat = *move_strat;
+            side_map[idx].cum_strat += *move_strat;
         }
-        choice
+
+        let mut rng = rng();
+        WeightedIndex::new(&strategy).unwrap().sample(&mut rng)
     }
 
     /*
@@ -101,16 +131,15 @@ impl Node {
             self.populate(s1_options, s2_options);
         }
 
-        let s1_mc_index = self.maximize_ucb_for_side(&self.s1_options.as_ref().unwrap());
-        let s2_mc_index = self.maximize_ucb_for_side(&self.s2_options.as_ref().unwrap());
-        // Bucket of possibilities weighted by likelihood (e.g. 30% chance to burn)
+        let s1_mc_index = Self::exp3_selection(self.s1_options.as_mut().unwrap());
+        let s2_mc_index = Self::exp3_selection(self.s2_options.as_mut().unwrap());
+
+        // Bucket of stochastic outcomes for this (s1, s2) pair (e.g. 30% burn).
         let child_vector = self.children.get_mut(&(s1_mc_index, s2_mc_index));
         match child_vector {
             Some(child_vector) => {
                 let child_vec_ptr = child_vector as *mut Vec<Node>;
                 let chosen_child = self.sample_node(child_vec_ptr);
-                // Each instruction is a small delta from the actions taken that turn (e.g. do 20
-                // damage to p1), this just applies each delta one by one to the game state
                 state.apply_instructions(&(*chosen_child).instructions.instruction_list);
                 (*chosen_child).selection(state)
             }
@@ -151,6 +180,7 @@ impl Node {
         {
             return (self as *mut Node, 0);
         }
+        debug_assert!(self.root || !self.parent.is_null());
         let should_branch_on_damage = self.root || (*self.parent).root;
         let mut new_instructions =
             generate_instructions_from_move_pair(state, s1_move, s2_move, should_branch_on_damage);
@@ -191,18 +221,31 @@ impl Node {
             &mut (*self.parent).s1_options.as_mut().unwrap()[self.s1_choice as usize];
         parent_s1_movenode.total_score += score;
         parent_s1_movenode.visits += 1;
+        parent_s1_movenode.est_score +=
+            score as f64 / parent_s1_movenode.curr_strat.max(CURR_STRAT_FLOOR);
+        assert!(
+            parent_s1_movenode.est_score.is_finite(),
+            "exp3 s1 est_score is not finite"
+        );
 
         let parent_s2_movenode =
             &mut (*self.parent).s2_options.as_mut().unwrap()[self.s2_choice as usize];
         parent_s2_movenode.total_score += 1.0 - score;
         parent_s2_movenode.visits += 1;
+        parent_s2_movenode.est_score +=
+            (1.0 - score) as f64 / parent_s2_movenode.curr_strat.max(CURR_STRAT_FLOOR);
+        assert!(
+            parent_s2_movenode.est_score.is_finite(),
+            "exp3 s2 est_score is not finite"
+        );
 
         state.reverse_instructions(&self.instructions.instruction_list);
         (*self.parent).backpropagate(score, state);
+        
     }
 
     /*
-     * Return a score based on the current battle state (sigmoid to the parent)
+     * Return a score based on the current battle state 
      */
     pub fn rollout(&mut self, state: &mut State, root_eval: &f32) -> f32 {
         let battle_is_over = state.battle_is_over();
@@ -224,6 +267,9 @@ pub struct MoveNode {
     pub move_choice: MoveChoice,
     pub total_score: f32,
     pub visits: u32,
+    pub cum_strat: f64,
+    pub curr_strat: f64,
+    pub est_score: f64,
 }
 
 impl MoveNode {
@@ -255,11 +301,35 @@ impl MoveNode {
     }
 }
 
+pub fn average_strategy(side_map: &[MoveNode], gamma: f64) -> Vec<f32> {
+    let k = side_map.len();
+    let uniform = 1.0 / k as f32;
+    // cum_strat is incremented for every arm on every selection traversal of this
+    // node, so the correct denominator (eq. 12) is the total number of traversals,
+    // which equals the sum of per-arm visits at this node.
+    let total_visits: u64 = side_map.iter().map(|m| m.visits as u64).sum();
+    if total_visits == 0 {
+        return vec![uniform; k];
+    }
+    let t = total_visits as f64;
+    let floor = gamma / k as f64;
+    let unnormalized: Vec<f64> = side_map
+        .iter()
+        .map(|m| ((m.cum_strat / t) - floor).max(0.0))
+        .collect();
+    let sum: f64 = unnormalized.iter().sum();
+    if sum <= 0.0 {
+        return vec![uniform; k];
+    }
+    unnormalized.iter().map(|s| (s / sum) as f32).collect()
+}
+
 #[derive(Clone)]
 pub struct MctsSideResult {
     pub move_choice: MoveChoice,
     pub total_score: f32,
     pub visits: u32,
+    pub avg_strat: f32,
 }
 
 impl MctsSideResult {
@@ -293,7 +363,7 @@ fn do_mcts(root_node: &mut Node, state: &mut State, root_eval: &f32) -> (u16, u3
     (leaf_depth, nodes_added)
 }
 
-pub fn perform_mcts(
+pub fn perform_mcts_exp3(
     state: &mut State,
     side_one_options: Vec<MoveChoice>,
     side_two_options: Vec<MoveChoice>,
@@ -330,9 +400,9 @@ pub fn perform_mcts(
         MoveNode.total_score stops updating because f32 does not have enough precision
 
         I can push the problem farther out by using f64 but if the bot is running for 10 million iterations
-        then it almost certainly sees a forced winm
+        then it almost certainly sees a forced win
         */
-        if root_node.times_visited == 10_000_000 {
+        if root_node.times_visited >= 10_000_000 {
             break;
         }
     }
@@ -345,7 +415,7 @@ pub fn perform_mcts(
         0.0
     };
     let log_path = std::env::var("POKE_MCTS_STATS_LOG")
-        .unwrap_or_else(|_| format!("/Users/vishruthraj/Code/CS498AlgoEng/final_project/poke-engine/logs/poke_mcts_stats_ucb_{}_{}.log", std::process::id(), max_time.as_millis()));
+        .unwrap_or_else(|_| format!("/Users/vishruthraj/Code/CS498AlgoEng/final_project/poke-engine/logs/poke_mcts_stats_exp3_{}.log", std::process::id()));
     if let Ok(file) = OpenOptions::new().create(true).append(true).open(&log_path) {
         let mut w = BufWriter::new(file);
         let _ = writeln!(
@@ -355,16 +425,21 @@ pub fn perform_mcts(
         );
     }
 
+    let s1_avg = average_strategy(root_node.s1_options.as_ref().unwrap(), GAMMA);
+    let s2_avg = average_strategy(root_node.s2_options.as_ref().unwrap(), GAMMA);
+
     let result = MctsResult {
         s1: root_node
             .s1_options
             .as_ref()
             .unwrap()
             .iter()
-            .map(|v| MctsSideResult {
+            .enumerate()
+            .map(|(i, v)| MctsSideResult {
                 move_choice: v.move_choice.clone(),
                 total_score: v.total_score,
                 visits: v.visits,
+                avg_strat: s1_avg[i],
             })
             .collect(),
         s2: root_node
@@ -372,10 +447,12 @@ pub fn perform_mcts(
             .as_ref()
             .unwrap()
             .iter()
-            .map(|v| MctsSideResult {
+            .enumerate()
+            .map(|(i, v)| MctsSideResult {
                 move_choice: v.move_choice.clone(),
                 total_score: v.total_score,
                 visits: v.visits,
+                avg_strat: s2_avg[i],
             })
             .collect(),
         iteration_count: root_node.times_visited,

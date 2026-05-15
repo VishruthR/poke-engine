@@ -19,6 +19,8 @@ pub mod choices;
 pub mod instruction;
 pub mod io;
 pub mod mcts;
+pub mod mcts_regret_matching;
+pub mod mcts_exp3;
 pub mod pokemon;
 pub mod search;
 pub mod state;
