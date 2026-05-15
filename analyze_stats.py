@@ -1,3 +1,7 @@
+"""
+This file was primarily written by Claude Opus 4.7 in Claude Code
+"""
+
 import sys
 import os
 import glob
